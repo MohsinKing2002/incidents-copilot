@@ -10,8 +10,8 @@ from app.db.base import Base
 class IncidentEvent(Base):
     __tablename__ = "incident_events"
 
-    __table_args__ = Index(
-        "idx_incident_events_incident_created", "incident_id", "created_at"
+    __table_args__ = (
+        Index("idx_incident_events_incident_created", "incident_id", "created_at"),
     )
 
     # Primary key
