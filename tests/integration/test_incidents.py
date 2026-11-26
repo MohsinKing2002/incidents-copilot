@@ -1,7 +1,7 @@
 import uuid
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -225,3 +225,111 @@ async def test_invalid_incident_check_constraints(
         await db_session.flush()
 
     await db_session.rollback()
+
+
+# Test cascading delete of child records
+@pytest.mark.asyncio
+async def test_cascade_delete_incident(db_session: AsyncSession):
+    # 1. create parent incident
+    incident = Incident(
+        title="Payment service outage",
+        service_name="payment-service",
+        environment="production",
+        severity="critical",
+    )
+
+    db_session.add(incident)
+    await db_session.flush()  # Flush to get the incident ID before creating logs/events
+
+    # 2. create child records using foreign key
+    logs = [
+        IncidentLog(
+            incident_id=incident.id,
+            message=f"Error log {i}",
+            source="payment-service",
+            level="ERROR",
+        )
+        for i in range(3)
+    ]
+
+    events = [
+        IncidentEvent(
+            incident_id=incident.id,
+            event_type="status_changed",
+            old_value="open",
+            new_value="investigating",
+            actor="engineer@example.com",
+        ),
+        IncidentEvent(
+            incident_id=incident.id,
+            event_type="status_changed",
+            old_value="investigating",
+            new_value="resolved",
+            actor="engineer@example.com",
+        ),
+    ]
+
+    db_session.add_all(logs + events)
+    await db_session.commit()
+
+    # 3. delete parent incident
+    await db_session.delete(incident)
+    await db_session.commit()
+
+    # 4. verify parent deletion
+    result = await db_session.execute(
+        select(Incident).where(Incident.id == incident.id)
+    )
+
+    assert result.scalar_one_or_none() is None
+
+    # 5. verify child records are also deleted
+    logs_count = await db_session.scalar(
+        select(func.count())
+        .select_from(IncidentLog)
+        .where(IncidentLog.incident_id == incident.id)
+    )
+
+    events_count = await db_session.scalar(
+        select(func.count())
+        .select_from(IncidentEvent)
+        .where(IncidentEvent.incident_id == incident.id)
+    )
+
+    assert logs_count == 0
+    assert events_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transaction_rollback(db_session: AsyncSession):
+    # 1. create indicent
+    incident = Incident(
+        title="Temporary outage",
+        service_name="payment-service",
+        environment="production",
+        severity="high",
+    )
+
+    db_session.add(incident)
+
+    # 2. Flush insert to PostgreSQL
+    await db_session.flush()
+
+    incident_id = incident.id
+
+    # 3. incident existance verify
+    result = await db_session.execute(
+        select(Incident).where(Incident.id == incident_id)
+    )
+
+    assert result.scalar_one_or_none() is not None
+
+    # 4. rollback the session transaction
+    await db_session.rollback()
+
+    # 5. verify incident - no longer exists
+    result = await db_session.execute(
+        select(Incident).where(Incident.id == incident_id)
+    )
+
+    assert result.scalar_one_or_none() is None
